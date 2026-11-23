@@ -2,11 +2,17 @@
 Scheduler Service – APScheduler-based cron for OCI stack automation.
 
 Schedule: 6:00 AM, 9:00 AM, 7:00 PM, 11:00 PM IST daily.
-Workflow:  Plan → Apply → Email (on success) → Stop scheduler.
+Workflow:
+  1. Create Plan job on OCI stack
+  2. If Plan succeeds → Wait 2 minutes
+  3. Create Apply job with the plan
+  4. If Apply succeeds → Send email via Brevo → Stop scheduler
+  5. If Apply fails (e.g. out of capacity) → Wait for next scheduled run
 """
 
 import os
 import logging
+import time
 from datetime import datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -22,22 +28,25 @@ logger = logging.getLogger('cloud_activation')
 scheduler = BackgroundScheduler(timezone='Asia/Kolkata')
 _scheduler_started = False
 
+WAIT_AFTER_PLAN_SECONDS = 120  # Wait 2 minutes between Plan and Apply
+
 
 def run_activation_job():
     """
     Execute the full activation workflow:
-    1. Create Plan job on the OCI stack
-    2. If Plan succeeds → Create Apply job
-    3. If Apply succeeds → Send email → Stop scheduler
+    1. Plan stack
+    2. Wait 2 minutes
+    3. Apply stack
+    4. Send email (on success)
+    5. Stop scheduler (on success)
     """
-    # Import here to avoid circular imports
     from cloud_activation.models import JobRun, AllocationStatus
-    from cloud_activation.services.oci_service import run_plan_and_apply
+    from cloud_activation.services.oci_service import create_plan_job, create_apply_job
     from cloud_activation.services.email_service import send_success_email
 
     status = AllocationStatus.load()
 
-    # If already allocated, don't run
+    # If already allocated, do not run
     if status.is_allocated:
         logger.info("Cloud already allocated. Skipping job and stopping scheduler.")
         stop_scheduler()
@@ -48,61 +57,95 @@ def run_activation_job():
         logger.error("OCI_STACK_OCID not set in environment.")
         return
 
-    # Create a job run record
+    # Create job run record
     job_run = JobRun.objects.create(status='PLANNING')
     status.total_attempts += 1
     status.last_attempt_at = timezone.now()
+    status.last_attempt_status = 'PLANNING'
     status.save()
 
     logger.info(f"═══ Activation attempt #{status.total_attempts} started ═══")
 
     try:
-        result = run_plan_and_apply(stack_ocid)
+        # ─────────────────────────────────────────────────────────────
+        # Step 1: PLAN
+        # ─────────────────────────────────────────────────────────────
+        logger.info("Step 1: Starting OCI Plan job...")
+        plan_result = create_plan_job(stack_ocid)
+        job_run.plan_job_ocid = plan_result.get('job_id')
 
-        if result['plan']:
-            job_run.plan_job_ocid = result['plan']['job_id']
-            if result['plan']['status'] != 'SUCCEEDED':
-                job_run.status = 'PLAN_FAILED'
-                job_run.error_message = result.get('error', 'Plan did not succeed')
+        if plan_result.get('status') != 'SUCCEEDED':
+            job_run.status = 'PLAN_FAILED'
+            job_run.error_message = f"Plan job completed with status: {plan_result.get('status')}"
+            status.last_attempt_status = 'PLAN_FAILED'
+            status.save()
+            logger.warning(f"Plan failed: {job_run.error_message}")
+            return
 
-        if result['apply']:
-            job_run.apply_job_ocid = result['apply']['job_id']
+        # Plan succeeded!
+        job_run.status = 'PLAN_SUCCEEDED'
+        job_run.save()
+        status.last_attempt_status = 'PLAN_SUCCEEDED'
+        status.save()
+        logger.info(f"✅ Plan SUCCEEDED (Job: {job_run.plan_job_ocid})")
 
-        if result['success']:
-            # Apply succeeded!
+        # ─────────────────────────────────────────────────────────────
+        # Step 2: WAIT 2 MINUTES
+        # ─────────────────────────────────────────────────────────────
+        logger.info(f"⏳ Waiting {WAIT_AFTER_PLAN_SECONDS} seconds (2 minutes) before applying plan...")
+        time.sleep(WAIT_AFTER_PLAN_SECONDS)
+
+        # ─────────────────────────────────────────────────────────────
+        # Step 3: APPLY
+        # ─────────────────────────────────────────────────────────────
+        logger.info("Step 3: Creating and running OCI Apply job...")
+        job_run.status = 'APPLYING'
+        job_run.save()
+        status.last_attempt_status = 'APPLYING'
+        status.save()
+
+        apply_result = create_apply_job(stack_ocid, plan_result['job_id'])
+        job_run.apply_job_ocid = apply_result.get('job_id')
+
+        if apply_result.get('status') == 'SUCCEEDED':
+            # Apply SUCCEEDED! Instance is allotted!
             job_run.status = 'APPLY_SUCCEEDED'
             job_run.completed_at = timezone.now()
+            job_run.save()
 
-            # Send notification email
+            logger.info("🎉 Stack apply SUCCEEDED! Cloud has been allotted.")
+
+            # Step 4: Send success email
             email_sent = send_success_email()
             if email_sent:
                 job_run.email_sent = True
                 job_run.status = 'EMAIL_SENT'
+                job_run.save()
 
-            # Update allocation status
+            # Mark cloud as allocated
             status.is_allocated = True
             status.allocated_at = timezone.now()
             status.last_attempt_status = 'APPLY_SUCCEEDED'
             status.scheduler_active = False
             status.save()
 
-            # Stop the scheduler
-            logger.info("🎉 Cloud allocated successfully! Stopping scheduler.")
+            # Step 5: Stop scheduler permanently
+            logger.info("Stopping scheduler permanently as cloud is now allotted.")
             stop_scheduler()
 
         else:
-            job_run.status = 'APPLY_FAILED' if result.get('apply') else 'PLAN_FAILED'
-            job_run.error_message = result.get('error', 'Unknown error')
-            status.last_attempt_status = job_run.status
+            job_run.status = 'APPLY_FAILED'
+            job_run.error_message = f"Apply job completed with status: {apply_result.get('status')}"
+            status.last_attempt_status = 'APPLY_FAILED'
             status.save()
-            logger.warning(f"Attempt failed: {result.get('error')}")
+            logger.warning(f"Apply failed: {job_run.error_message}")
 
     except Exception as e:
+        logger.error(f"Activation workflow error: {e}", exc_info=True)
         job_run.status = 'ERROR'
         job_run.error_message = str(e)
         status.last_attempt_status = 'ERROR'
         status.save()
-        logger.error(f"Activation job error: {e}")
 
     finally:
         job_run.completed_at = timezone.now()
@@ -118,7 +161,6 @@ def start_scheduler():
         logger.info("Scheduler already running.")
         return
 
-    # Import here to avoid startup issues
     from cloud_activation.models import AllocationStatus
     status = AllocationStatus.load()
 
@@ -159,7 +201,6 @@ def stop_scheduler():
         _scheduler_started = False
         logger.info("Scheduler stopped.")
 
-    # Update DB
     try:
         from cloud_activation.models import AllocationStatus
         status = AllocationStatus.load()
@@ -170,8 +211,7 @@ def stop_scheduler():
 
 
 def get_next_run_times(count=4):
-    """Get the next scheduled run times."""
-    from datetime import datetime
+    """Get the next scheduled run times in Asia/Kolkata timezone."""
     import pytz
 
     ist = pytz.timezone('Asia/Kolkata')

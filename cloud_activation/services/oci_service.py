@@ -4,7 +4,6 @@ OCI Service – Handles Resource Manager plan & apply operations.
 
 import os
 import logging
-import tempfile
 import time
 
 import oci
@@ -17,6 +16,7 @@ logger = logging.getLogger('cloud_activation')
 # ── Job polling config ──
 POLL_INTERVAL_SECONDS = 15
 MAX_POLL_ATTEMPTS = 120  # 30 minutes max wait
+WAIT_AFTER_PLAN_SECONDS = 120  # Wait 2 minutes between Plan and Apply as required
 
 
 def _get_oci_config():
@@ -69,7 +69,7 @@ def create_plan_job(stack_ocid: str) -> dict:
     plan_details = oci.resource_manager.models.CreateJobDetails(
         stack_id=stack_ocid,
         operation='PLAN',
-        display_name=f'plan-job-auto',
+        display_name='plan-job-auto',
     )
 
     logger.info(f"Creating PLAN job for stack {stack_ocid}...")
@@ -91,19 +91,21 @@ def create_plan_job(stack_ocid: str) -> dict:
 def create_apply_job(stack_ocid: str, plan_job_id: str) -> dict:
     """
     Create an APPLY job using the given plan job.
+    Uses CreateApplyJobOperationDetails with execution_plan_strategy='FROM_PLAN_JOB_ID'.
     Returns dict with 'job_id', 'status', 'display_name'.
     """
     client = _get_resource_manager_client()
 
+    apply_operation = oci.resource_manager.models.CreateApplyJobOperationDetails(
+        execution_plan_strategy='FROM_PLAN_JOB_ID',
+        execution_plan_job_id=plan_job_id,
+    )
+
     apply_details = oci.resource_manager.models.CreateJobDetails(
         stack_id=stack_ocid,
         operation='APPLY',
-        display_name=f'apply-job-auto',
-        apply_job_plan_resolution=oci.resource_manager.models.ApplyJobPlanResolution(
-            plan_job_id=plan_job_id,
-            is_use_latest_job_id=False,
-            is_auto_approved=True,
-        ),
+        display_name='apply-job-auto',
+        job_operation_details=apply_operation,
     )
 
     logger.info(f"Creating APPLY job for stack {stack_ocid} using plan {plan_job_id}...")
@@ -119,42 +121,4 @@ def create_apply_job(stack_ocid: str, plan_job_id: str) -> dict:
         'display_name': final_job.display_name,
     }
     logger.info(f"Apply job result: {result}")
-    return result
-
-
-def run_plan_and_apply(stack_ocid: str) -> dict:
-    """
-    Execute the full plan → apply workflow.
-    Returns a summary dict.
-    """
-    result = {
-        'plan': None,
-        'apply': None,
-        'success': False,
-        'error': None,
-    }
-
-    try:
-        # Step 1: Plan
-        plan_result = create_plan_job(stack_ocid)
-        result['plan'] = plan_result
-
-        if plan_result['status'] != 'SUCCEEDED':
-            result['error'] = f"Plan failed with status: {plan_result['status']}"
-            return result
-
-        # Step 2: Apply
-        apply_result = create_apply_job(stack_ocid, plan_result['job_id'])
-        result['apply'] = apply_result
-
-        if apply_result['status'] == 'SUCCEEDED':
-            result['success'] = True
-            logger.info("✅ Stack apply SUCCEEDED!")
-        else:
-            result['error'] = f"Apply failed with status: {apply_result['status']}"
-
-    except Exception as e:
-        result['error'] = str(e)
-        logger.error(f"OCI operation error: {e}")
-
     return result
