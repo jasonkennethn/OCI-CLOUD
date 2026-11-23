@@ -1,0 +1,204 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCI Cloud Activation</title>
+    <link rel="stylesheet" href="{% static 'css/style.css' %}">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☁️</text></svg>">
+</head>
+<body>
+
+<div class="ambient"></div>
+
+<div class="container" id="dashboard" data-next-run="{{ next_run_iso|default:'' }}">
+
+    <!-- ── Header ── -->
+    <header class="header">
+        <div class="header__badge" id="status-badge">
+            {% if status.is_allocated %}
+                <span class="dot dot--inactive"></span> Allocated
+            {% elif status.scheduler_active %}
+                <span class="dot"></span> Scheduler Active
+            {% else %}
+                <span class="dot dot--inactive"></span> Scheduler Stopped
+            {% endif %}
+        </div>
+        <h1 class="header__title">OCI Cloud Activation</h1>
+        <p class="header__sub">Automated A1 Flex Instance · ap-mumbai-1</p>
+    </header>
+
+    <!-- ── Status Hero ── -->
+    <div class="card status-hero">
+        {% if status.is_allocated %}
+            <div class="status-hero__icon status-hero__icon--success" id="status-icon">✓</div>
+            <h2 class="status-hero__title" id="status-title">Cloud Allocated</h2>
+            <p class="status-hero__sub" id="status-sub">
+                Instance provisioned on {{ status.allocated_at|date:"d M Y, h:i A" }} IST
+            </p>
+        {% else %}
+            <div class="status-hero__icon status-hero__icon--pending" id="status-icon">⟳</div>
+            <h2 class="status-hero__title" id="status-title">Waiting for Capacity</h2>
+            <p class="status-hero__sub" id="status-sub">
+                {% if status.total_attempts > 0 %}
+                    {{ status.total_attempts }} attempt{{ status.total_attempts|pluralize }} so far · Last: {{ status.last_attempt_status|default:"—" }}
+                {% else %}
+                    Scheduler will attempt at the next scheduled time
+                {% endif %}
+            </p>
+
+            <!-- Timer -->
+            {% if schedule.next_run %}
+            <div class="timer" id="timer-section">
+                <div class="timer__block">
+                    <div class="timer__value" id="timer-hours">{{ schedule.time_remaining.hours|stringformat:"02d" }}</div>
+                    <div class="timer__label">Hours</div>
+                </div>
+                <div class="timer__block">
+                    <div class="timer__value" id="timer-minutes">{{ schedule.time_remaining.minutes|stringformat:"02d" }}</div>
+                    <div class="timer__label">Minutes</div>
+                </div>
+                <div class="timer__block">
+                    <div class="timer__value" id="timer-seconds">{{ schedule.time_remaining.seconds|stringformat:"02d" }}</div>
+                    <div class="timer__label">Seconds</div>
+                </div>
+            </div>
+            {% endif %}
+        {% endif %}
+    </div>
+
+    <!-- ── Info Grid ── -->
+    <div class="grid">
+
+        <!-- Stack Details -->
+        <div class="card">
+            <div class="card__header">
+                <span class="card__title">Stack Details</span>
+            </div>
+            <div class="info-row">
+                <span class="info-row__label">Stack Name</span>
+                <span class="info-row__value">celarox-a1-personal-cloud</span>
+            </div>
+            <div class="info-row">
+                <span class="info-row__label">Shape</span>
+                <span class="info-row__value">VM.Standard.A1.Flex</span>
+            </div>
+            <div class="info-row">
+                <span class="info-row__label">OCPUs / RAM</span>
+                <span class="info-row__value">2 / 12 GB</span>
+            </div>
+            <div class="info-row">
+                <span class="info-row__label">Region</span>
+                <span class="info-row__value">ap-mumbai-1</span>
+            </div>
+            <div class="info-row">
+                <span class="info-row__label">Status</span>
+                <span class="info-row__value">
+                    {% if status.is_allocated %}
+                        <span class="badge badge--success"><span class="badge__dot"></span>Allocated</span>
+                    {% else %}
+                        <span class="badge badge--pending"><span class="badge__dot"></span>Pending</span>
+                    {% endif %}
+                </span>
+            </div>
+        </div>
+
+        <!-- Scheduler Info -->
+        <div class="card">
+            <div class="card__header">
+                <span class="card__title">Scheduler</span>
+                <span id="scheduler-status">
+                    {% if status.scheduler_active %}
+                        <span class="badge badge--active"><span class="badge__dot"></span>Active</span>
+                    {% else %}
+                        <span class="badge badge--pending"><span class="badge__dot"></span>Stopped</span>
+                    {% endif %}
+                </span>
+            </div>
+            <div class="info-row">
+                <span class="info-row__label">Total Attempts</span>
+                <span class="info-row__value" id="total-attempts">{{ status.total_attempts }}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-row__label">Last Attempt</span>
+                <span class="info-row__value" id="last-status">{{ status.last_attempt_status|default:"—" }}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-row__label">Schedule (IST)</span>
+                <span class="info-row__value" style="font-size: 11px;">6 AM · 9 AM · 7 PM · 11 PM</span>
+            </div>
+            {% if schedule.next_run %}
+            <div class="info-row">
+                <span class="info-row__label">Next Run</span>
+                <span class="info-row__value" style="font-size: 11px;">{{ schedule.next_run.label }} · {{ schedule.next_run.date }}</span>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- ── Upcoming Schedule ── -->
+    {% if schedule.upcoming and not status.is_allocated %}
+    <div class="card">
+        <div class="card__header">
+            <span class="card__title">Upcoming Runs</span>
+        </div>
+        <ul class="schedule-list">
+            {% for run in schedule.upcoming %}
+            <li class="schedule-item">
+                <span class="schedule-item__marker"></span>
+                <span class="schedule-item__time">{{ run.label }}</span>
+                <span class="schedule-item__date">{{ run.date }}</span>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    <!-- ── Recent Jobs ── -->
+    {% if recent_jobs %}
+    <div class="card">
+        <div class="card__header">
+            <span class="card__title">Recent Jobs</span>
+        </div>
+        <table class="jobs-table">
+            <thead>
+                <tr>
+                    <th>Run</th>
+                    <th>Status</th>
+                    <th>Time</th>
+                    <th>Email</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for job in recent_jobs %}
+                <tr>
+                    <td>#{{ job.id }}</td>
+                    <td>
+                        {% if job.status == 'APPLY_SUCCEEDED' or job.status == 'EMAIL_SENT' %}
+                            <span class="badge badge--success"><span class="badge__dot"></span>{{ job.status }}</span>
+                        {% elif 'FAILED' in job.status or job.status == 'ERROR' %}
+                            <span class="badge badge--failed"><span class="badge__dot"></span>{{ job.status }}</span>
+                        {% else %}
+                            <span class="badge badge--pending"><span class="badge__dot"></span>{{ job.status }}</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ job.started_at|date:"d M, h:i A" }}</td>
+                    <td>{% if job.email_sent %}✓{% else %}—{% endif %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <!-- ── Footer ── -->
+    <footer class="footer">
+        <p class="footer__text">Celarox Cloud · req-oci-cloud.onrender.com</p>
+    </footer>
+
+</div>
+
+<script src="{% static 'js/dashboard.js' %}"></script>
+</body>
+</html>

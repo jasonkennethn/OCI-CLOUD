@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: req-oci-cloud
+    runtime: python
+    plan: free
+    buildCommand: ./build.sh
+    startCommand: gunicorn oci_cloud_project.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --threads 2 --timeout 120 --preload
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.6"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        value: "req-oci-cloud.onrender.com"
+      - key: RUN_SCHEDULER
+        value: "true"
+      - key: OCI_USER_OCID
+        sync: false
+      - key: OCI_TENANCY_OCID
+        sync: false
+      - key: OCI_FINGERPRINT
+        sync: false
+      - key: OCI_REGION
+        sync: false
+      - key: OCI_API_PRIVATE_KEY
+        sync: false
+      - key: OCI_STACK_OCID
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: EMAIL_SENDER
+        sync: false
+      - key: EMAIL_RECIPIENT
+        sync: false
